@@ -1,0 +1,1 @@
+CLI tool to port liked songs and playlists from spotify to ytmusic.
