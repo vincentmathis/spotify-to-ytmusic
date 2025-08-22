@@ -1,37 +1,40 @@
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
+from rich.console import Console
+from dotenv import load_dotenv
+
+load_dotenv()
+
+CONSOLE = Console()
+SPOTIFY = spotipy.Spotify(
+    auth_manager=SpotifyOAuth(scope="user-library-read playlist-read-private")
+)
 
 
-def get_spotify_client():
-    return spotipy.Spotify(
-        auth_manager=SpotifyOAuth(
-            scope="user-library-read playlist-read-private playlist-modify-private playlist-modify-public"
-        )
-    )
-
-
-def get_liked_tracks(sp, limit=5000):
-    results, offset = [], 0
-    while True:
-        batch = sp.current_user_saved_tracks(limit=50, offset=offset)
-        items = batch["items"]
-        if not items:
-            break
-        for item in items:
-            track = item["track"]
-            results.append(
-                {"title": track["name"], "artist": track["artists"][0]["name"]}
-            )
-        offset += 50
-        if len(results) >= limit:
-            break
+def get_liked_tracks():
+    results, batch_size, offset = [], 50, 0
+    with CONSOLE.status(
+        "[bold green]Fetching Spotify likes...[/bold green]", spinner="dots"
+    ):
+        while True:
+            batch = SPOTIFY.current_user_saved_tracks(limit=batch_size, offset=offset)
+            items = batch["items"]
+            if not items:
+                break
+            for item in items:
+                track = item["track"]
+                results.append(
+                    {"title": track["name"], "artist": track["artists"][0]["name"]}
+                )
+            offset += batch_size
+    CONSOLE.print(f"[green]Found {len(results)} liked songs on Spotify.[/green]")
     return results
 
 
-def get_playlists(sp):
+def get_playlists():
     playlists, offset = [], 0
     while True:
-        batch = sp.current_user_playlists(limit=50, offset=offset)
+        batch = SPOTIFY.current_user_playlists(limit=50, offset=offset)
         if not batch["items"]:
             break
         playlists.extend(batch["items"])
@@ -39,11 +42,11 @@ def get_playlists(sp):
     return playlists
 
 
-def get_playlist_tracks(sp, playlist_id, limit=5000):
+def get_playlist_tracks(playlist_id, limit=5000):
     tracks = []
     offset = 0
     while True:
-        batch = sp.playlist_items(playlist_id, limit=100, offset=offset)
+        batch = SPOTIFY.playlist_items(playlist_id, limit=100, offset=offset)
         items = batch["items"]
         if not items:
             break

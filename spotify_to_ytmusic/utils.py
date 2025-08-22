@@ -1,24 +1,34 @@
+import re
 from rapidfuzz import fuzz
 
 
-def normalize(s: str) -> str:
-    return "".join(c for c in s.lower() if c.isalnum() or c.isspace()).strip()
+def normalize(string: str) -> str:
+    if not string:
+        return ""
+    string = string.lower()
+    # remove (feat. ...), (featuring ...), (with ...) in () or []
+    string = re.sub(r"[\(\[].*?(feat\.|featuring|with).*?[\)\]]", "", string)
+    # remove common suffixes like " - Remastered", " - Live", " - 2011 Version"
+    string = re.sub(r"(original mix|remaster(ed)?|live|version.*)", "", string)
+    # only alnum + space
+    string = "".join(c for c in string if c.isalnum() or c.isspace())
+    return string.strip()
 
 
-def best_match(song, results):
-    target_title = normalize(song["title"])
-    target_artist = normalize(song["artist"])
-    best_score = 0
-    best_result = None
+def ranked_matches(song, results):
+    """Return all YTMusic results scored against the target song, sorted best-first"""
+    target = f"{normalize(song['title'])} {normalize(song['artist'])}".strip()
+    scored = []
+
     for r in results:
         if "videoId" not in r:
             continue
-        yt_title = normalize(r["title"])
-        yt_artist = normalize(r["artists"][0]["name"]) if r.get("artists") else ""
-        score = (
-            fuzz.ratio(target_title, yt_title) + fuzz.ratio(target_artist, yt_artist)
-        ) / 2
-        if score > best_score:
-            best_score = score
-            best_result = r
-    return best_result, best_score
+        candidate_title = normalize(r["title"])
+        candidate_artist = (
+            normalize(r["artists"][0]["name"]) if r.get("artists") else ""
+        )
+        candidate = f"{candidate_title} {candidate_artist}".strip()
+        score = fuzz.ratio(target, candidate)
+        scored.append((r, score))
+
+    return sorted(scored, key=lambda x: x[1], reverse=True)
