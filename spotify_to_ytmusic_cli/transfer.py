@@ -1,30 +1,17 @@
 from utils import normalize, ranked_matches
 import spotify_client
 import ytmusic_client
-# from ytmusic_client import (
-#     get_playlist_by_name,
-#     ensure_playlist_ready,
-#     get_playlist_track_ids,
-#     add_with_retry,
-# )
-# from spotify_client import (
-#     get_spotify_client,
-#     get_liked_tracks,
-#     get_playlists,
-#     get_playlist_tracks,
-# )
 import questionary
 from rich.console import Console
-from rich.live import Live
+from rich.layout import Layout
 from rich.panel import Panel
 from rich.table import Table
+from rich.live import Live
+from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
 
 console = Console()
 
 
-# -------------------
-# Helpers
-# -------------------
 def is_already_liked(track, cache):
     key = (normalize(track["title"]), tuple(normalize(track["artist"]).split()[:10]))
     for liked_title, liked_artists in cache:
@@ -33,17 +20,38 @@ def is_already_liked(track, cache):
     return False
 
 
-def make_progress_table():
-    t = Table(show_header=True, header_style="bold", expand=True, box=None)
-    t.add_column("Action", style="yellow", overflow="fold", ratio=1)
-    t.add_column("Spotify Track", style="green", overflow="fold", ratio=2)
-    t.add_column("YouTube Song", style="red", overflow="fold", ratio=2)
-    t.add_column("Confidence", style="white", justify="right", width=10, no_wrap=True)
-    return t
+def create_ui_elements(track_count):
+    # Create a progress instance
+    progress = Progress(
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(bar_width=None),
+        "[progress.percentage]{task.percentage:>3.0f}%",
+        TimeRemainingColumn(),
+    )
+
+    # Add a progress task
+    task = progress.add_task("Transfering", total=track_count)
+
+    # Create a table
+    table = Table(show_header=True, header_style="bold", expand=True, box=None)
+    table.add_column("Action", style="yellow", overflow="fold", ratio=1)
+    table.add_column("Spotify Track", style="green", overflow="fold", ratio=2)
+    table.add_column("YouTube Song", style="red", overflow="fold", ratio=2)
+    table.add_column("Confidence", style="white", justify="right", width=10, no_wrap=True)
+
+    # Create layout
+    layout = Layout()
+    layout.split_column(
+        Layout(Panel(table, title="Data"), name="upper"),
+        Layout(Panel(progress, title="Progress"), name="lower", size=3),
+    )
+    return layout, table, progress, task
 
 
 def print_row(table, action, track_str, song_str, score):
+    # FIXME table doesn't scrool
     table.add_row(action, track_str, song_str, f"{score:.0f}%")
+    
 
 
 def ask_user_choice(track, matches):
@@ -51,9 +59,6 @@ def ask_user_choice(track, matches):
     console.print(
         f"Could not auto-match: {track['title']} — {track['artist']}",
         style="red",
-        # Panel.fit(
-        #     f"Could not auto-match: {track['title']} — {track['artist']}", style="red"
-        # )
     )
     choices = []
     for r, sc in matches[:5]:
@@ -68,22 +73,21 @@ def ask_user_choice(track, matches):
     return matches[choices.index(choice)][0]
 
 
-# -------------------
-# Generic transfer loop
-# -------------------
 def transfer_items(
     tracks,
     mode="LIKES",  # or "PLAYLIST"
     ytm_cache=None,
     playlist_name=None,
 ):
-    table = make_progress_table()
+    """Generic transfer loop for liked songs or a playlist."""
+    layout, table, progress, task = create_ui_elements(len(tracks))
 
     playlist_id = None
     existing_ids = set()
 
     if mode == "PLAYLIST":
         # ensure playlist exists
+        # FIXME doesn't find exsiting lists
         yt_playlist = ytmusic_client.get_playlist_by_name(playlist_name)
         if not yt_playlist:
             console.print(
@@ -92,9 +96,9 @@ def transfer_items(
             yt_playlist = ytmusic_client.ensure_playlist_ready(playlist_name)
         playlist_id = yt_playlist["playlistId"]
         existing_ids = set(ytmusic_client.get_playlist_track_ids(playlist_id))
-
-    with Live(table, console=console, refresh_per_second=4, transient=False) as live:
+    with Live(layout, console=console, refresh_per_second=4, transient=False) as live:
         for track in tracks:
+            progress.update(task, advance=1)
             track_str = f"{track['title']} — {track['artist']}"
 
             if mode == "LIKES" and is_already_liked(track, ytm_cache):
@@ -138,7 +142,9 @@ def transfer_items(
                         ytmusic_client.YTMUSIC.rate_song(chosen["videoId"], "LIKE")
                         print_row(table, "LIKED", track_str, chosen["title"], score)
                     else:
-                        ytmusic_client.YTMUSIC.add_playlist_items(playlist_id, [chosen["videoId"]])
+                        ytmusic_client.YTMUSIC.add_playlist_items(
+                            playlist_id, [chosen["videoId"]]
+                        )
                         print_row(table, "ADDED", track_str, chosen["title"], score)
                 else:
                     print_row(table, "SKIPPED (manual)", track_str, "-", 0)
@@ -148,7 +154,7 @@ def transfer_items(
         console.print(Panel.fit("Completed transferring liked songs.", style="green"))
     else:
         console.print(
-            Panel.fit(f"Completed transferring {playlist_name}", style="green")
+            Panel.fit(f"Completed transferring '{playlist_name}'", style="green")
         )
 
 
@@ -166,6 +172,8 @@ def transfer_playlist():
     playlist_choice = questionary.select(
         "Pick a Spotify playlist to transfer:", [p["name"] for p in playlists]
     ).ask()
+    if not playlist_choice:
+        raise KeyboardInterrupt
     selected_playlist = next(p for p in playlists if p["name"] == playlist_choice)
     tracks = spotify_client.get_playlist_tracks(selected_playlist["id"])
     transfer_items(tracks, mode="PLAYLIST", playlist_name=selected_playlist["name"])

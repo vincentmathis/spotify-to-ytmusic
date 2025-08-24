@@ -1,10 +1,36 @@
-from ytmusicapi import YTMusic
-from ytmusicapi.exceptions import YTMusicServerError
+import os
+import sys
+import json
 from time import sleep
+from ytmusicapi import setup_oauth, YTMusic
+from ytmusicapi.exceptions import YTMusicServerError
 from rich.console import Console
 
 CONSOLE = Console()
-YTMUSIC = YTMusic("browser.json")
+
+
+def init_ytmusic_client(config_dir):
+    global YTMUSIC
+    ytmusic_oauth_creds = os.path.join(config_dir, "ytmusic-oauth-creds.json")
+    if not os.path.exists(ytmusic_oauth_creds):
+        CONSOLE.print(f"[red]Please put the downloaded google cloud app file here: {ytmusic_oauth_creds}")
+        print("\nExiting...")
+        sys.exit(0)
+    creds = json.load(open(ytmusic_oauth_creds))
+
+    ytmusic_oauth_token = os.path.join(config_dir, "ytmusic-oauth-token.json")
+    if not os.path.exists(ytmusic_oauth_token):
+        setup_oauth(
+            creds["installed"]["client_id"],
+            creds["installed"]["client_secret"],
+            ytmusic_oauth_token,
+            open_browser=True,
+        )
+
+    YTMUSIC = YTMusic(
+        auth=ytmusic_oauth_token,
+        oauth_credentials=ytmusic_oauth_creds,
+    )
 
 
 def get_liked_cache():

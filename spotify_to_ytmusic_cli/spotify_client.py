@@ -1,14 +1,45 @@
+import os
+import sys
+import json
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 from rich.console import Console
-from dotenv import load_dotenv
-
-load_dotenv()
 
 CONSOLE = Console()
-SPOTIFY = spotipy.Spotify(
-    auth_manager=SpotifyOAuth(scope="user-library-read playlist-read-private")
-)
+
+
+def init_spotify_client(config_dir):
+    global SPOTIFY
+    spotify_oauth_creds = os.path.join(config_dir, "spotify-oauth-creds.json")
+    if not os.path.exists(spotify_oauth_creds):
+        with open(spotify_oauth_creds, "w+") as json_file:
+            json.dump(
+                {
+                    "spotipy_client_id": "",
+                    "spotipy_client_secret": "",
+                    "spotipy_redirect_uri": "https://127.0.0.1/callback",
+                },
+                json_file,
+            )
+    creds = json.load(open(spotify_oauth_creds))
+    if creds["spotipy_client_id"] == "":
+        CONSOLE.print(
+            f"[red]Please enter the spotify client id and secret here: {spotify_oauth_creds}"
+        )
+        print("\nExiting...")
+        sys.exit(0)
+
+    spotify_oauth_token = os.path.join(config_dir, "spotify-oauth-token.json")
+    spotify_oauth = SpotifyOAuth(
+        creds["spotipy_client_id"],
+        creds["spotipy_client_secret"],
+        creds["spotipy_redirect_uri"],
+        scope="user-library-read playlist-read-private",
+        cache_path=spotify_oauth_token,
+    )
+
+    token_info = spotify_oauth.get_access_token(as_dict=True)
+    SPOTIFY = spotipy.Spotify(auth=token_info["access_token"])
 
 
 def get_liked_tracks():
