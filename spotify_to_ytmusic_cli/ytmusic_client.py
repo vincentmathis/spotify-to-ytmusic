@@ -1,113 +1,109 @@
 import os
 import sys
 import json
-from time import sleep
+import time
 from ytmusicapi import setup_oauth, YTMusic
 from ytmusicapi.exceptions import YTMusicServerError
 from rich.console import Console
 
-CONSOLE = Console()
+console = Console()
 
 
-def init_ytmusic_client(config_dir):
-    global YTMUSIC
-    ytmusic_oauth_creds = os.path.join(config_dir, "ytmusic-oauth-creds.json")
-    if not os.path.exists(ytmusic_oauth_creds):
-        CONSOLE.print(f"[red]Please put the downloaded google cloud app file here: {ytmusic_oauth_creds}")
-        print("\nExiting...")
-        sys.exit(0)
-    creds = json.load(open(ytmusic_oauth_creds))
+class YtMusicClient:
+    def __init__(self, config_dir: str):
+        self.config_dir = config_dir
+        creds_path = os.path.join(config_dir, "ytmusic-oauth-creds.json")
+        token_path = os.path.join(config_dir, "ytmusic-oauth-token.json")
 
-    ytmusic_oauth_token = os.path.join(config_dir, "ytmusic-oauth-token.json")
-    if not os.path.exists(ytmusic_oauth_token):
-        setup_oauth(
-            creds["installed"]["client_id"],
-            creds["installed"]["client_secret"],
-            ytmusic_oauth_token,
-            open_browser=True,
-        )
+        if not os.path.exists(creds_path):
+            console.print(
+                f"[red]Missing Google OAuth credentials at {creds_path}[/red]"
+            )
+            sys.exit(1)
 
-    YTMUSIC = YTMusic(
-        auth=ytmusic_oauth_token,
-        oauth_credentials=ytmusic_oauth_creds,
-    )
+        # Run OAuth flow if no token yet
+        if not os.path.exists(token_path):
+            creds = json.load(open(creds_path))
+            setup_oauth(
+                creds["installed"]["client_id"],
+                creds["installed"]["client_secret"],
+                token_path,
+                open_browser=True,
+            )
 
+        print(token_path)
+        self.client = YTMusic(auth=token_path, oauth_credentials=creds_path)
 
-def get_liked_cache():
-    with CONSOLE.status(
-        "[bold green]Fetching YT Music likes...[/bold green]", spinner="dots"
-    ):
-        liked = YTMUSIC.get_liked_songs(limit=5000)["tracks"]
-        CONSOLE.print(f"[green]Found {len(liked)} liked songs on YT Music.[/green]")
-        cache = set()
-        for item in liked:
-            title = item["title"].lower()
-            artists = tuple(a["name"].lower() for a in item.get("artists", []))
-            cache.add((title, artists))
-    return cache
+    # ---------------- Likes ----------------
+    def get_liked_cache(self, limit=5000):
+        with console.status("[bold green]Fetching YT Music likes...", spinner="dots"):
+            liked = self.client.get_liked_songs(limit=limit)["tracks"]
+        console.print(f"[green]Found {len(liked)} liked songs on YT Music[/green]")
+        return {
+            (
+                item["title"].lower(),
+                tuple(a["name"].lower() for a in item.get("artists", [])),
+            )
+            for item in liked
+        }
 
+    # ---------------- Playlists ----------------
+    def get_playlist_by_name(self, name):
+        playlists = self.client.get_library_playlists(limit=None)
+        print(len(playlists))
+        for p in playlists:
+            print(p["title"].lower(), name.lower(), p["title"].lower() == name.lower())
+            if p["title"].lower() == name.lower():
+                return p
+        return None
 
-def get_playlist_by_name(name):
-    """Return YT playlist dict if exists, else None"""
-    playlists = YTMUSIC.get_library_playlists(limit=500)
-    for p in playlists:
-        if p["title"].lower() == name.lower():
-            return p
-    return None
+    def ensure_playlist_ready(self, name, description=""):
+        p = self.get_playlist_by_name(name)
+        if p:
+            return {"playlistId": p["playlistId"], "title": p["title"]}
+        else:
+            console.print(
+                f"[blue]Playlist '{name}' not found on YTMusic. Creating...[/blue]"
+            )
+            res = self.client.create_playlist(name, description)
+            playlist_id = res if isinstance(res, str) else res["playlistId"]
 
+        # Wait until playlist is visible
+        for delay in (0.5, 1, 2, 3, 5):
+            try:
+                res = self.client.get_playlist(playlist_id, limit=1)
+                return {"playlistId": res["id"], "title": res["title"]}
+            except Exception:
+                time.sleep(delay)
+        raise RuntimeError("Couldn't confirm YT Music playlist creation")
 
-def ensure_playlist_ready(name, description=""):
-    """
-    Return {'playlistId': ..., 'title': ...} for an existing or newly created playlist.
-    Works around YTMUSIC.create_playlist() returning either a string or a dict,
-    and waits until get_playlist succeeds (eventual consistency).
-    """
-    p = get_playlist_by_name(name)
-    if p:
-        return {"playlistId": p["playlistId"], "title": p["title"]}
+    def get_playlist_track_ids(self, playlist_id):
+        tracks = self.client.get_playlist(playlist_id, limit=1000)["tracks"]
+        return {t["videoId"] for t in tracks if "videoId" in t}
 
-    res = YTMUSIC.create_playlist(name, description)
-    playlistId = res if isinstance(res, str) else res["playlistId"]
+    def add_with_retry(self, playlist_id, video_id, existing_ids):
+        backoff = [0, 0.5, 1, 2]
+        for delay in backoff:
+            try:
+                self.client.add_playlist_items(playlist_id, [video_id])
+                existing_ids.add(video_id)
+                return True
+            except YTMusicServerError as e:
+                if "409" in str(e):
+                    refreshed = self.get_playlist_track_ids(playlist_id)
+                    existing_ids.clear()
+                    existing_ids.update(refreshed)
+                    if video_id in existing_ids:
+                        return False  # already there
+            time.sleep(delay)
+        return False
 
-    # Poll for readiness
-    for delay in (0.5, 1, 2, 3, 5):
-        try:
-            res = YTMUSIC.get_playlist(playlistId, limit=1)
-            return {"playlistId": res["id"], "title": res["title"]}
-        except Exception:
-            sleep(delay)
-    raise Exception("Couldn't get YT Music Playlist")
-    return None
+    # ---------------- Tracks ----------------
+    def search_tracks(self, query: str, limit=20):
+        return self.client.search(query, filter="songs", limit=limit)
 
+    def like_song(self, video_id: str):
+        return self.client.rate_song(video_id, "LIKE")
 
-def add_with_retry(playlist_id, vid, existing_ids):
-    """
-    Add a single video to a playlist with retries.
-    - Updates existing_ids on success.
-    - If a 409 occurs, refreshes existing_ids and skips if already present.
-    """
-    backoff = [0, 0.5, 1, 2]
-    for i, delay in enumerate(backoff, start=1):
-        try:
-            YTMUSIC.add_playlist_items(playlist_id, [vid])
-            existing_ids.add(vid)
-            return True
-        except YTMusicServerError as e:
-            msg = str(e)
-            if "409" in msg:
-                # Likely duplicate or race; refresh and skip if present
-                refreshed = get_playlist_track_ids(playlist_id)
-                existing_ids.clear()
-                existing_ids.update(refreshed)
-                if vid in existing_ids:
-                    return False  # already there; treat as success/skip
-            if i == len(backoff):
-                raise
-            sleep(delay)
-    return False
-
-
-def get_playlist_track_ids(playlist_id):
-    """Return set of videoIds already in a YT playlist"""
-    tracks = YTMUSIC.get_playlist(playlist_id, limit=1000)["tracks"]
-    return {t["videoId"] for t in tracks if "videoId" in t}
+    def add_to_playlist(self, playlist_id: str, video_id: str):
+        return self.client.add_playlist_items(playlist_id, [video_id])
