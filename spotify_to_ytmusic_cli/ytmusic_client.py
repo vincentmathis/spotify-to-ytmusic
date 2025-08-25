@@ -4,6 +4,7 @@ import json
 import time
 from ytmusicapi import setup_oauth, YTMusic
 from ytmusicapi.exceptions import YTMusicServerError
+from ytmusicapi.models.content.enums import LikeStatus
 from rich.console import Console
 
 console = Console()
@@ -50,9 +51,9 @@ class YtMusicClient:
     # ---------------- Playlists ----------------
     def get_playlist_by_name(self, name):
         playlists = self.client.get_library_playlists(limit=None)
-        print(len(playlists))
+        # FIXME sometimes not all playlists are found
+        # print(len(playlists))
         for p in playlists:
-            print(p["title"].lower(), name.lower(), p["title"].lower() == name.lower())
             if p["title"].lower() == name.lower():
                 return p
         return None
@@ -103,7 +104,7 @@ class YtMusicClient:
         return self.client.search(query, filter="songs", limit=limit)
 
     def like_song(self, video_id: str):
-        return self.client.rate_song(video_id, "LIKE")
+        return self.client.rate_song(video_id, LikeStatus.LIKE)
 
     def add_to_playlist(self, playlist_id: str, video_id: str):
         return self.client.add_playlist_items(playlist_id, [video_id])

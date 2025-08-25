@@ -1,17 +1,11 @@
 import os
-from utils import normalize, ranked_matches
+from platformdirs import user_config_dir
+from rich.live import Live
+import ui
 from spotify_client import SpotifyClient
 from ytmusic_client import YtMusicClient
-import questionary
-from rich.console import Console
-from rich.layout import Layout
-from rich.panel import Panel
-from rich.table import Table
-from rich.live import Live
-from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
-from platformdirs import user_config_dir
+from utils import normalize, ranked_matches
 
-console = Console()
 
 # init clients once
 config_dir = user_config_dir("spotify-to-ytmusic-cli", appauthor="vincent-mathis")
@@ -22,122 +16,93 @@ YTMUSIC = YtMusicClient(config_dir)
 
 def is_already_liked(track, cache):
     key = (normalize(track["title"]), tuple(normalize(track["artist"]).split()[:10]))
-    for liked_title, liked_artists in cache:
-        if key[0] == liked_title and any(a in liked_artists for a in key[1]):
-            return True
-    return False
-
-
-def create_ui_elements(track_count):
-    progress = Progress(
-        TextColumn("[bold blue]{task.description}"),
-        BarColumn(bar_width=None),
-        "[progress.percentage]{task.percentage:>3.0f}%",
-        TimeRemainingColumn(),
-    )
-    task = progress.add_task("Transferring", total=track_count)
-
-    table = Table(show_header=True, header_style="bold", expand=True, box=None)
-    table.add_column("Action", style="yellow", overflow="fold", ratio=1)
-    table.add_column("Spotify Track", style="green", overflow="fold", ratio=2)
-    table.add_column("YouTube Song", style="red", overflow="fold", ratio=2)
-    table.add_column(
-        "Confidence", style="white", justify="right", width=10, no_wrap=True
+    return any(
+        key[0] == liked_title and any(a in liked_artists for a in key[1])
+        for liked_title, liked_artists in cache
     )
 
-    layout = Layout()
-    layout.split_column(
-        Layout(Panel(table, title="Data"), name="upper"),
-        Layout(Panel(progress, title="Progress"), name="lower", size=3),
-    )
-    return layout, table, progress, task
+
+def match_track(track, live, existing_ids=None):
+    results = YTMUSIC.search_tracks(f"{track['title']} {track['artist']}")
+    matches = ranked_matches(track, results)
+    if not matches:
+        return None, 0
+
+    best, score = matches[0]
+
+    # Check for duplicates in playlist
+    if existing_ids and best["videoId"] in existing_ids:
+        return "DUPLICATE", score
+
+    # Ask user if confidence is low
+    if score < 90:
+        live.stop()
+        # FIXME if chosen song already in playlist, skip
+        chosen = ui.ask_user_choice(track, matches)
+        live.start()
+        if chosen:
+            return chosen, score
+        return None, 0
+
+    return best, score
 
 
-def print_row(table, action, track_str, song_str, score):
-    table.add_row(action, track_str, song_str, f"{score:.0f}%")
+def apply_action(track, best_match, score, mode, playlist_id=None, existing_ids=None):
+    track_str = f"{track['title']} — {track['artist']}"
+    if best_match == "DUPLICATE":
+        return "SKIPPED (already added)", track_str, "-", 0
 
+    if not best_match:
+        return "SKIPPED (manual)", track_str, "-", 0
 
-def ask_user_choice(track, matches):
-    console.print(
-        f"Could not auto-match: {track['title']} — {track['artist']}", style="red"
-    )
-    choices = []
-    for r, sc in matches[:5]:
-        artists = ", ".join(a["name"] for a in r.get("artists", []))
-        link = f"https://music.youtube.com/watch?v={r['videoId']}"
-        choices.append(f"{r['title']} — {artists} ({link}, {sc:.0f}%)")
-    choices.append("Skip")
+    song_str = f"{best_match['title']} — {', '.join(a['name'] for a in best_match.get('artists', []))}"
+    vid = best_match["videoId"]
 
-    choice = questionary.select("Pick best match:", choices).ask()
-    return None if choice == "Skip" else matches[choices.index(choice)][0]
+    if mode == "LIKES":
+        YTMUSIC.like_song(vid)
+        return "LIKED", track_str, song_str, score
+    else:
+        success = YTMUSIC.add_with_retry(playlist_id, vid, existing_ids)
+        return (
+            ("ADDED", track_str, song_str, score)
+            if success
+            else ("SKIPPED (error)", track_str, song_str, score)
+        )
 
 
 def transfer_items(tracks, mode="LIKES", ytm_cache=None, playlist_name=None):
-    """Generic transfer loop for liked songs or a playlist."""
-    layout, table, progress, task = create_ui_elements(len(tracks))
-
+    layout, table, progress, task = ui.create_layout(len(tracks))
     playlist_id = None
     existing_ids = set()
+
     if mode == "PLAYLIST":
         yt_playlist = YTMUSIC.ensure_playlist_ready(playlist_name)
         playlist_id = yt_playlist["playlistId"]
         existing_ids = set(YTMUSIC.get_playlist_track_ids(playlist_id))
 
-    with Live(layout, console=console, refresh_per_second=4, transient=False) as live:
+    with Live(
+        layout, console=ui.console, refresh_per_second=4, transient=False
+    ) as live:
         for track in tracks:
-            progress.update(task, advance=1)
-            track_str = f"{track['title']} — {track['artist']}"
-
             if mode == "LIKES" and is_already_liked(track, ytm_cache):
-                print_row(table, "SKIPPED (already liked)", track_str, "-", 0)
+                ui.print_row(
+                    table,
+                    "SKIPPED (already liked)",
+                    f"{track['title']} — {track['artist']}",
+                    "-",
+                    0,
+                )
                 continue
 
-            results = YTMUSIC.search_tracks(f"{track['title']} {track['artist']}")
-            matches = ranked_matches(track, results)
-            if not matches:
-                console.print(f"[red][SKIP][/red] No match for {track_str}")
-                continue
+            best_match, score = match_track(track, live, existing_ids)
+            action, track_str, song_str, score = apply_action(
+                track, best_match, score, mode, playlist_id, existing_ids
+            )
+            ui.print_row(table, action, track_str, song_str, score)
 
-            best, score = matches[0]
-            best_artists = ", ".join(a["name"] for a in best["artists"])
-            song_str = f"{best['title']} — {best_artists}"
-            vid = best["videoId"]
+            progress.update(task, advance=1)
 
-            if mode == "PLAYLIST" and vid in existing_ids:
-                print_row(table, "SKIPPED (already added)", track_str, song_str, score)
-                continue
-
-            if score >= 90:
-                if mode == "LIKES":
-                    YTMUSIC.like_song(vid)
-                    print_row(table, "LIKED", track_str, song_str, score)
-                else:
-                    if YTMUSIC.add_with_retry(playlist_id, vid, existing_ids):
-                        print_row(table, "ADDED", track_str, song_str, score)
-                    else:
-                        print_row(table, "SKIPPED (error)", track_str, song_str, score)
-            else:
-                live.stop()
-                chosen = ask_user_choice(track, matches)
-                live.start()
-                if chosen:
-                    if mode == "LIKES":
-                        YTMUSIC.like_song(chosen["videoId"])
-                        print_row(table, "LIKED", track_str, chosen["title"], score)
-                    else:
-                        YTMUSIC.add_with_retry(
-                            playlist_id, [chosen["videoId"]], existing_ids
-                        )
-                        print_row(table, "ADDED", track_str, chosen["title"], score)
-                else:
-                    print_row(table, "SKIPPED (manual)", track_str, "-", 0)
-
-    msg = (
-        "Completed transferring liked songs."
-        if mode == "LIKES"
-        else f"Completed transferring '{playlist_name}'"
-    )
-    console.print(Panel.fit(msg, style="green"))
+    ui.show_completion_message(mode, playlist_name)
 
 
 # -------------------
@@ -151,9 +116,7 @@ def transfer_liked_songs():
 
 def transfer_playlist():
     playlists = SPOTIFY.get_playlists()
-    playlist_choice = questionary.select(
-        "Pick a Spotify playlist to transfer:", [p["name"] for p in playlists]
-    ).ask()
+    playlist_choice = ui.ask_user_playlist(playlists)
     if not playlist_choice:
         raise KeyboardInterrupt
     selected = next(p for p in playlists if p["name"] == playlist_choice)
