@@ -1,4 +1,4 @@
-# CLI tool to port liked songs and playlists from Spotify to YT Music.
+# CLI tool to port liked songs and playlists from Spotify to YT Music. (UNFINISHED)
 
 ## Use Poetry to install dependencies in virtual environment
 
