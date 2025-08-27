@@ -6,7 +6,7 @@ from ytmusicapi import setup_oauth, YTMusic
 from ytmusicapi.exceptions import YTMusicServerError
 from ytmusicapi.models.content.enums import LikeStatus
 from rich.console import Console
-
+# TODO replace rich console, use TUI
 console = Console()
 
 
@@ -32,21 +32,14 @@ class YtMusicClient:
                 open_browser=True,
             )
 
-        print(token_path)
         self.client = YTMusic(auth=token_path, oauth_credentials=creds_path)
 
     # ---------------- Likes ----------------
     def get_liked_cache(self, limit=5000):
-        with console.status("[bold green]Fetching YT Music likes...", spinner="dots"):
-            liked = self.client.get_liked_songs(limit=limit)["tracks"]
-        console.print(f"[green]Found {len(liked)} liked songs on YT Music[/green]")
-        return {
-            (
-                item["title"].lower(),
-                tuple(a["name"].lower() for a in item.get("artists", [])),
-            )
-            for item in liked
-        }
+        liked_tracks = self.client.get_liked_songs(limit=limit)["tracks"]
+        # with console.status("[bold green]Fetching YT Music likes...", spinner="dots"):
+        # console.print(f"[green]Found {len(liked)} liked songs on YT Music[/green]")
+        return {track["videoId"] for track in liked_tracks}
 
     # ---------------- Playlists ----------------
     def get_playlist_by_name(self, name):
@@ -78,11 +71,11 @@ class YtMusicClient:
                 time.sleep(delay)
         raise RuntimeError("Couldn't confirm YT Music playlist creation")
 
-    def get_playlist_track_ids(self, playlist_id):
-        tracks = self.client.get_playlist(playlist_id, limit=1000)["tracks"]
-        return {t["videoId"] for t in tracks if "videoId" in t}
+    def get_playlist_cache(self, playlist_id):
+        songs = self.client.get_playlist(playlist_id, limit=5000)["tracks"]
+        return {t["videoId"] for t in songs if "videoId" in t}
 
-    def add_with_retry(self, playlist_id, video_id, existing_ids):
+    def add_track_to_playlist(self, playlist_id: str, video_id: str, existing_ids: set):
         backoff = [0, 0.5, 1, 2]
         for delay in backoff:
             try:
@@ -91,7 +84,7 @@ class YtMusicClient:
                 return True
             except YTMusicServerError as e:
                 if "409" in str(e):
-                    refreshed = self.get_playlist_track_ids(playlist_id)
+                    refreshed = self.get_playlist_cache(playlist_id)
                     existing_ids.clear()
                     existing_ids.update(refreshed)
                     if video_id in existing_ids:
@@ -103,8 +96,5 @@ class YtMusicClient:
     def search_tracks(self, query: str, limit=20):
         return self.client.search(query, filter="songs", limit=limit)
 
-    def like_song(self, video_id: str):
+    def like_track(self, video_id: str):
         return self.client.rate_song(video_id, LikeStatus.LIKE)
-
-    def add_to_playlist(self, playlist_id: str, video_id: str):
-        return self.client.add_playlist_items(playlist_id, [video_id])

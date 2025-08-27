@@ -4,7 +4,7 @@ import json
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 from rich.console import Console
-
+# TODO replace rich console, use TUI
 console = Console()
 
 
@@ -24,7 +24,7 @@ class SpotifyClient:
                         "spotipy_redirect_uri": "http://127.0.0.1:8888/callback",
                     },
                     f,
-                    indent=2,
+                    indent=4,
                 )
 
         creds = json.load(open(creds_path))
@@ -48,23 +48,22 @@ class SpotifyClient:
     # ---------------- Likes ----------------
     def get_liked_tracks(self, limit=5000):
         results, offset, batch_size = [], 0, 50
-        with console.status("[bold green]Fetching Spotify likes...", spinner="dots"):
-            while True:
-                batch = self.client.current_user_saved_tracks(
-                    limit=batch_size, offset=offset
+        # TODO show progress
+        while True:
+            batch = self.client.current_user_saved_tracks(
+                limit=batch_size, offset=offset
+            )
+            items = batch["items"]
+            if not items:
+                break
+            for item in items:
+                track = item["track"]
+                results.append(
+                    {"title": track["name"], "artist": track["artists"][0]["name"]}
                 )
-                items = batch["items"]
-                if not items:
-                    break
-                for item in items:
-                    track = item["track"]
-                    results.append(
-                        {"title": track["name"], "artist": track["artists"][0]["name"]}
-                    )
-                offset += batch_size
-                if len(results) >= limit:
-                    break
-        console.print(f"[green]Found {len(results)} liked songs on Spotify[/green]")
+            offset += batch_size
+            if len(results) >= limit:
+                break
         return results
 
     # ---------------- Playlists ----------------

@@ -1,7 +1,7 @@
 import re
 from rapidfuzz import fuzz
 
-
+# TODO improve normalization
 def normalize(string: str) -> str:
     if not string:
         return ""
